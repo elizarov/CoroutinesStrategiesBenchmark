@@ -68,29 +68,167 @@ private inline val Byte.ui: Int get() = this.toInt() and 0xff
 open class NoSuspendBenchmark {
     var index = 0
 
-    // --------------------- NoSuspend ---------------------
+    // --------------------- NoSuspendPlain ---------------------
 
-    fun readByteNoSuspend(): Byte {
+    fun readByteNoSuspendPlain(): Byte {
         return bytes[index++]
     }
 
-    fun readIntNoSuspend(): Int {
-        return readByteNoSuspend().ui or
-            (readByteNoSuspend().ui shl 8) or
-            (readByteNoSuspend().ui shl 16) or
-            (readByteNoSuspend().ui shl 24)
+    fun readIntNoSuspendPlain(): Int {
+        return readByteNoSuspendPlain().ui or
+            (readByteNoSuspendPlain().ui shl 8) or
+            (readByteNoSuspendPlain().ui shl 16) or
+            (readByteNoSuspendPlain().ui shl 24)
     }
 
-    fun readSumNoSuspend(): Int {
+    fun readSumNoSuspendPlain(): Int {
         var sum = 0
-        for (i in indexRange) sum += readIntNoSuspend()
+        for (i in indexRange) sum += readIntNoSuspendPlain()
         return sum
     }
 
     @Benchmark
-    fun testNoSuspend() {
+    fun testNoSuspendPlain() {
         index = 0
-        val sum = readSumNoSuspend()
+        val sum = readSumNoSuspendPlain()
+        check(sum == expectedSum)
+    }
+    
+    
+    // --------------------- NoSuspendSM ---------------------
+
+    fun readByteNoSuspendSM(): Byte {
+        return bytes[index++]
+    }
+
+    fun readIntNoSuspendSM(): Int {
+        var label = 0
+        var acc = 0
+        var v: Byte = 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    v = readByteNoSuspendSM()
+                }
+                1 -> {
+                    acc = v.ui
+                    label = 2
+                    v = readByteNoSuspendSM()
+                }
+                2 -> {
+                    acc = (v.ui shl 8) or acc
+                    label = 3
+                    v = readByteNoSuspendSM()
+                }
+                3 -> {
+                    acc = (v.ui shl 16) or acc
+                    label = 4
+                    v = readByteNoSuspendSM()
+                }
+                4 -> {
+                    acc = (v.ui shl 24) or acc
+                    return acc
+                }
+            }
+        }
+    }
+
+    fun readSumNoSuspendSM(): Int {
+        var label = 0
+        var sum = 0
+        val iter = indexRange.iterator()
+        var v = 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (!iter.hasNext()) return 0
+                    iter.nextInt()
+                    v = readIntNoSuspendSM()
+                }
+                1 -> {
+                    sum += v
+                    if (!iter.hasNext()) return sum
+                    iter.nextInt()
+                    v = readIntNoSuspendSM()
+                }
+            }
+        }
+    }
+
+    @Benchmark
+    fun testNoSuspendSM() {
+        index = 0
+        val sum = readSumNoSuspendSM()
+        check(sum == expectedSum)
+    }
+    // --------------------- NoSuspendSMBoxed ---------------------
+
+    fun readByteNoSuspendSMBoxed(): Byte? {
+        return bytes[index++]
+    }
+
+    fun readIntNoSuspendSMBoxed(): Int? {
+        var label = 0
+        var acc = 0
+        var v: Any? = null
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    v = readByteNoSuspendSMBoxed()
+                }
+                1 -> {
+                    acc = (v as Byte).ui
+                    label = 2
+                    v = readByteNoSuspendSMBoxed()
+                }
+                2 -> {
+                    acc = ((v as Byte).ui shl 8) or acc
+                    label = 3
+                    v = readByteNoSuspendSMBoxed()
+                }
+                3 -> {
+                    acc = ((v as Byte).ui shl 16) or acc
+                    label = 4
+                    v = readByteNoSuspendSMBoxed()
+                }
+                4 -> {
+                    acc = ((v as Byte).ui shl 24) or acc
+                    return acc
+                }
+            }
+        }
+    }
+
+    fun readSumNoSuspendSMBoxed(): Int? {
+        var label = 0
+        var sum = 0
+        val iter = indexRange.iterator()
+        var v: Any? = null
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (!iter.hasNext()) return 0
+                    iter.nextInt()
+                    v = readIntNoSuspendSMBoxed()
+                }
+                1 -> {
+                    sum += v as Int
+                    if (!iter.hasNext()) return sum
+                    iter.nextInt()
+                    v = readIntNoSuspendSMBoxed()
+                }
+            }
+        }
+    }
+
+    @Benchmark
+    fun testNoSuspendSMBoxed() {
+        index = 0
+        val sum = readSumNoSuspendSMBoxed()
         check(sum == expectedSum)
     }
 }
@@ -575,14 +713,11 @@ open class SuspendStrategiesBenchmark {
         fun doSuspend(cont: Continuation<T>): Any?
     }
 
-    private inline fun <T> suspendLazy(cont: Continuation<T>?, crossinline block: (Continuation<T>) -> Any?): Any? {
-        if (cont == null) return object : Suspender<T> {
-            override fun doSuspend(cont: Continuation<T>): Any? {
-                return block(cont)
-            }
-        }
-        return block(cont)
-    }
+    private inline fun <T> suspendLazy(cont: Continuation<T>?, crossinline block: (Continuation<T>) -> Any?): Any? =
+        if (cont == null) object : Suspender<T> {
+            override fun doSuspend(cont: Continuation<T>): Any? = block(cont)
+        } else
+            block(cont)
 
     private fun readByteSuspendLazyTag(cont: Continuation<Byte>?): Any? = suspendLazy(cont) { cont ->
         scheduled = Runnable { cont.resume(bytes[index++]) }
@@ -932,4 +1067,405 @@ open class SuspendStrategiesBenchmark {
         }
         check(sum == expectedSum)
     }
+    // --------------------- LazyNBTag ---------------------
+
+    private fun readByteSuspendLazyNBTag(cont: Continuation<Byte>?): Any? = suspendLazy(cont) { cont ->
+        scheduled = Runnable { cont.resume(bytes[index++]) }
+        COROUTINE_SUSPENDED
+    }
+
+    private fun readByteLazyNBTag(cont: Continuation<Byte>?): Any? {
+        // fast path -- no suspend
+        if (!shallSuspend()) return bytes[index++]
+        // slow path -- suspend
+        return readByteSuspendLazyNBTag(cont)
+    }
+
+    private inner class ReadIntLazyNBTagSM(
+        @JvmField val completion: Continuation<Int>,
+        @JvmField var label: Int,
+        @JvmField var acc: Int
+    ) : Continuation<Byte> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWithException(exception: Throwable) { completion.resumeWithException(exception) }
+
+        override fun resume(value: Byte) {
+            v = value
+            val result = readIntLazyNBTag(this)
+            if (result === COROUTINE_SUSPENDED) return
+            completion.resume(result as Int)
+        }
+
+        @JvmField var v: Byte = 0
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readIntLazyNBTag(cont: Continuation<*>?): Any? {
+        val sm = cont as? ReadIntLazyNBTagSM
+        var label = sm?.label ?: 0
+        var acc = sm?.acc ?: 0
+        var v: Byte = sm?.v ?: 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    val w = readByteLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val acc0 = acc
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Byte>).doSuspend(ReadIntLazyNBTagSM(cont, label0, acc0))
+                    }
+                    v = w as Byte
+                }
+                1 -> {
+                    acc = v.ui
+                    label = 2
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    val w = readByteLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val acc0 = acc
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Byte>).doSuspend(ReadIntLazyNBTagSM(cont, label0, acc0))
+                    }
+                    v = w as Byte
+                }
+                2 -> {
+                    acc = (v.ui shl 8) or acc
+                    label = 3
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    val w = readByteLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val acc0 = acc
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Byte>).doSuspend(ReadIntLazyNBTagSM(cont, label0, acc0))
+                    }
+                    v = w as Byte
+                }
+                3 -> {
+                    acc = (v.ui shl 16) or acc
+                    label = 4
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    val w = readByteLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val acc0 = acc
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Byte>).doSuspend(ReadIntLazyNBTagSM(cont, label0, acc0))
+                    }
+                    v = w as Byte
+                }
+                4 -> {
+                    acc = (v.ui shl 24) or acc
+                    return acc
+                }
+            }
+        }
+    }
+
+    private inner class ReadSumLazyNBTagSM(
+        @JvmField val completion: Continuation<Int>,
+        @JvmField var label: Int,
+        @JvmField var sum: Int,
+        @JvmField val iter: IntIterator
+    ): Continuation<Int> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWithException(exception: Throwable) { completion.resumeWithException(exception) }
+
+        override fun resume(value: Int) {
+            v = value
+            val result = readSumLazyNBTag(this)
+            if (result === COROUTINE_SUSPENDED) return
+            completion.resume(result as Int)
+        }
+
+        @JvmField var v: Int = 0
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readSumLazyNBTag(cont: Continuation<*>): Any? {
+        val sm = cont as? ReadSumLazyNBTagSM
+        var label = sm?.label ?: 0
+        var sum = sm?.sum ?: 0
+        val iter = sm?.iter ?: indexRange.iterator()
+        var v: Int = sm?.v ?: 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (!iter.hasNext()) return 0
+                    iter.nextInt()
+                    if (sm != null) {
+                        sm.label = label
+                        sm.sum = sum
+                    }
+                    val w = readIntLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val sum0 = sum
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Int>).doSuspend(ReadSumLazyNBTagSM(cont, label0, sum0, iter))
+                    }
+                    v = w as Int
+                }
+                1 -> {
+                    sum += v
+                    if (!iter.hasNext()) return sum
+                    iter.nextInt()
+                    if (sm != null) {
+                        sm.label = label
+                        sm.sum = sum
+                    }
+                    val w = readIntLazyNBTag(sm)
+                    if (w === COROUTINE_SUSPENDED) return COROUTINE_SUSPENDED
+                    val label0 = label; val sum0 = sum
+                    if (w is Suspender<*>) return suspendLazy(cont as? Continuation<Int>) { cont ->
+                        (w as Suspender<Int>).doSuspend(ReadSumLazyNBTagSM(cont, label0, sum0, iter))
+                    }
+                    v = w as Int
+                }
+            }
+        }
+    }
+
+    @Benchmark
+    fun testLazyNBTag() {
+        index = 0
+        val sum = runTestBlocking {
+            suspendCoroutineOrReturn<Int> { cont ->
+                readSumLazyNBTag(cont)
+            }
+        }
+        check(sum == expectedSum)
+    }
+
+    // --------------------- LazySEx ---------------------
+
+    abstract class SuspendException : Throwable(null, null, false, false) {
+        abstract fun doSuspend(cont: Continuation<*>): Any?
+    }
+
+    object SuspendException0 : SuspendException() {
+        override fun doSuspend(cont: Continuation<*>): Any? = COROUTINE_SUSPENDED
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private inline fun <T> suspendLazySEx(cont: Continuation<T>?, crossinline block: (Continuation<T>) -> Any?): T =
+        if (cont == null) throw object : SuspendException() {
+            override fun doSuspend(cont: Continuation<*>): Any? = block(cont as Continuation<T>)
+        } else {
+            val result = block(cont)
+            if (result == COROUTINE_SUSPENDED) throw SuspendException0 else result as T
+        }
+
+
+    private fun readByteSuspendLazySEx(cont: Continuation<Byte>?): Byte = suspendLazySEx(cont) { cont ->
+        scheduled = Runnable { cont.resume(bytes[index++]) }
+        COROUTINE_SUSPENDED
+    }
+
+    private fun readByteLazySEx(cont: Continuation<Byte>?): Byte {
+        // fast path -- no suspend
+        if (!shallSuspend()) return bytes[index++]
+        // slow path -- suspend
+        return readByteSuspendLazySEx(cont)
+    }
+
+    private inner class ReadIntLazySExSM(
+        @JvmField val completion: Continuation<Int>,
+        @JvmField var label: Int,
+        @JvmField var acc: Int
+    ) : Continuation<Byte> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWithException(exception: Throwable) { completion.resumeWithException(exception) }
+
+        override fun resume(value: Byte) {
+            v = value
+            val result = try { readIntLazySEx(this) }
+            catch (e: SuspendException) { return }
+            completion.resume(result)
+        }
+
+        @JvmField var v: Byte = 0
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readIntLazySEx(cont: Continuation<*>?): Int {
+        val sm = cont as? ReadIntLazySExSM
+        var label = sm?.label ?: 0
+        var acc = sm?.acc ?: 0
+        var v: Byte = sm?.v ?: 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    try {
+                        v = readByteLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val acc0 = acc
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadIntLazySExSM(cont, label0, acc0))
+                        }
+                    }
+                }
+                1 -> {
+                    acc = v.ui
+                    label = 2
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    try {
+                        v = readByteLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val acc0 = acc
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadIntLazySExSM(cont, label0, acc0))
+                        }
+                    }
+                }
+                2 -> {
+                    acc = (v.ui shl 8) or acc
+                    label = 3
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    try {
+                        v = readByteLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val acc0 = acc
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadIntLazySExSM(cont, label0, acc0))
+                        }
+                    }
+                }
+                3 -> {
+                    acc = (v.ui shl 16) or acc
+                    label = 4
+                    if (sm != null) {
+                        sm.label = label
+                        sm.acc = acc
+                    }
+                    try {
+                        v = readByteLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val acc0 = acc
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadIntLazySExSM(cont, label0, acc0))
+                        }
+                    }
+                }
+                4 -> {
+                    acc = (v.ui shl 24) or acc
+                    return acc
+                }
+            }
+        }
+    }
+
+    private inner class ReadSumLazySExSM(
+        @JvmField val completion: Continuation<Int>,
+        @JvmField var label: Int,
+        @JvmField var sum: Int,
+        @JvmField val iter: IntIterator
+    ): Continuation<Int> {
+        override val context: CoroutineContext = EmptyCoroutineContext
+        override fun resumeWithException(exception: Throwable) { completion.resumeWithException(exception) }
+
+        override fun resume(value: Int) {
+            v = value
+            val result = try { readSumLazySEx(this) }
+            catch (e: SuspendException) { return }
+            completion.resume(result)
+        }
+
+        @JvmField var v: Int = 0
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun readSumLazySEx(cont: Continuation<*>): Int {
+        val sm = cont as? ReadSumLazySExSM
+        var label = sm?.label ?: 0
+        var sum = sm?.sum ?: 0
+        val iter = sm?.iter ?: indexRange.iterator()
+        var v: Int = sm?.v ?: 0
+        while (true) {
+            when (label) {
+                0 -> {
+                    label = 1
+                    if (!iter.hasNext()) return 0
+                    iter.nextInt()
+                    if (sm != null) {
+                        sm.label = label
+                        sm.sum = sum
+                    }
+                    try {
+                        v = readIntLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val sum0 = sum
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadSumLazySExSM(cont, label0, sum0, iter))
+                        }
+                    }
+                }
+                1 -> {
+                    sum += v
+                    if (!iter.hasNext()) return sum
+                    iter.nextInt()
+                    if (sm != null) {
+                        sm.label = label
+                        sm.sum = sum
+                    }
+                    try {
+                        v = readIntLazySEx(sm)
+                    } catch (e: SuspendException) {
+                        if (e === SuspendException0) throw e
+                        val label0 = label; val sum0 = sum
+                        return suspendLazySEx(cont as? Continuation<Int>) { cont ->
+                            e.doSuspend(ReadSumLazySExSM(cont, label0, sum0, iter))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Benchmark
+    fun testLazySEx() {
+        index = 0
+        val sum = runTestBlocking {
+            suspendCoroutineOrReturn<Int> { cont ->
+                try { readSumLazySEx(cont) }
+                catch (e: SuspendException) { COROUTINE_SUSPENDED }
+            }
+        }
+        check(sum == expectedSum)
+    }
+
+}
+
+fun main(args: Array<String>) {
+    val b = SuspendStrategiesBenchmark()
+    b.suspendEvery = 65536
+    b.testLazyNBTag()
 }
